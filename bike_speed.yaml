@@ -1,0 +1,41 @@
+external_components:
+   - source: components/bike_speed_sensor
+
+esphome:
+  name: bike_speed_relay
+  #platform: ESP32
+  board: esp32dev
+
+wifi:
+  ssid: "YOUR_WIFI"
+  password: "YOUR_PASS"
+
+logger:
+api:
+ota:
+
+sensor:
+  - platform: bike_speed_sensor
+    reed_pin: 14
+    wheel_size: 28       # inches (Zoll)
+    name: "Bike Speed"
+    id: bike_speed
+
+switch:
+  - platform: gpio
+    pin: 27
+    id: relay
+    name: "Bike Relay"
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            sensor.in_range:
+              id: bike_speed
+              below: 2.0
+          then:
+            - switch.turn_on: relay
+          else:
+            - switch.turn_off: relay
