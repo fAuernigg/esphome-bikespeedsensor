@@ -1,28 +1,31 @@
+#pragma once
 #include "esphome.h"
 
 namespace bike_speed_sensor {
 
-class ReedSpeedSensor : public PollingComponent, public Sensor {
+class ReedSpeedSensor : public sensor::Sensor, public PollingComponent {
  public:
   int pin;
-  volatile int pulse_count = 0;
-  unsigned long last_update = 0;
   float wheel_inch;
   float wheel_circumference;
+  volatile int pulse_count = 0;
+  unsigned long last_update = 0;
 
   ReedSpeedSensor(int reed_pin, float wheel_size_inch)
       : pin(reed_pin), wheel_inch(wheel_size_inch) {
-    float diameter_m = wheel_inch * 0.0254;
-    wheel_circumference = 3.1416 * diameter_m;
+    wheel_circumference = wheel_inch * 3.1416f * 0.0254f;  // metres
   }
+
+  static void IRAM_ATTR on_pulse_static(void* arg) {
+    reinterpret_cast<ReedSpeedSensor*>(arg)->on_pulse();
+  }
+
+  void on_pulse() { pulse_count++; }
 
   void setup() override {
     pinMode(pin, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(pin),
-                    std::bind(&ReedSpeedSensor::onPulse, this), FALLING);
+    attachInterruptArg(digitalPinToInterrupt(pin), on_pulse_static, this, FALLING);
   }
-
-  void onPulse() { pulse_count++; }
 
   void update() override {
     unsigned long now = millis();
@@ -31,8 +34,8 @@ class ReedSpeedSensor : public PollingComponent, public Sensor {
     int pulses = pulse_count;
     pulse_count = 0;
     if (dt == 0) return;
-    float rps = (float)pulses / (dt / 1000.0);
-    float speed_kmh = wheel_circumference * rps * 3.6;
+    float rps = (float)pulses / (dt / 1000.0f);
+    float speed_kmh = wheel_circumference * rps * 3.6f;
     publish_state(speed_kmh);
   }
 };
