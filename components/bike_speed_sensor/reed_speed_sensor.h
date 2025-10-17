@@ -3,10 +3,10 @@
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 
-
+namespace esphome {
 namespace bike_speed_sensor {
 
-class ReedSpeedSensor : public sensor::Sensor, public PollingComponent {
+class ReedSpeedSensor : public esphome::sensor::Sensor, public esphome::PollingComponent {
  public:
   int pin;
   float wheel_inch;
