@@ -1,5 +1,8 @@
 #pragma once
 #include "esphome.h"
+#include "esphome/core/component.h"
+#include "esphome/components/sensor/sensor.h"
+
 
 namespace bike_speed_sensor {
 
