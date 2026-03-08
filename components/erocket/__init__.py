@@ -1,7 +1,7 @@
-"""ESPHome ERocket Component - Bike Speed + Ultrasonic Distance"""
+"""ESPHome ERocket Component - Bike Speed + UART Distance Sensors"""
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sensor, number
+from esphome.components import sensor, number, uart
 from esphome import pins
 from esphome.const import (
     CONF_ID,
@@ -9,18 +9,16 @@ from esphome.const import (
     UNIT_CENTIMETER,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
-DEPENDENCIES = []
+DEPENDENCIES = ['uart']
 AUTO_LOAD = ['sensor']
 
 # Configuration keys
 CONF_REED_PIN = "reed_pin"
 CONF_WHEEL_SIZE = "wheel_size"
-CONF_LEFT_TRIGGER_PIN = "left_trigger_pin"
-CONF_LEFT_ECHO_PIN = "left_echo_pin"
-CONF_RIGHT_TRIGGER_PIN = "right_trigger_pin"
-CONF_RIGHT_ECHO_PIN = "right_echo_pin"
+CONF_LEFT_UART_ID = "left_uart_id"
+CONF_RIGHT_UART_ID = "right_uart_id"
 CONF_LEFT_MOTOR_UP_PIN = "left_motor_up_pin"
 CONF_LEFT_MOTOR_DOWN_PIN = "left_motor_down_pin"
 CONF_RIGHT_MOTOR_UP_PIN = "right_motor_up_pin"
@@ -39,10 +37,8 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(ERocketComponent),
     cv.Required(CONF_REED_PIN): cv.int_range(min=0, max=39),
     cv.Optional(CONF_WHEEL_SIZE, default=26.0): cv.float_,
-    cv.Required(CONF_LEFT_TRIGGER_PIN): cv.int_range(min=0, max=39),
-    cv.Required(CONF_LEFT_ECHO_PIN): cv.int_range(min=0, max=39),
-    cv.Required(CONF_RIGHT_TRIGGER_PIN): cv.int_range(min=0, max=39),
-    cv.Required(CONF_RIGHT_ECHO_PIN): cv.int_range(min=0, max=39),
+    cv.Required(CONF_LEFT_UART_ID): cv.use_id(uart.UARTComponent),
+    cv.Required(CONF_RIGHT_UART_ID): cv.use_id(uart.UARTComponent),
     cv.Required(CONF_LEFT_MOTOR_UP_PIN): cv.int_range(min=0, max=39),
     cv.Required(CONF_LEFT_MOTOR_DOWN_PIN): cv.int_range(min=0, max=39),
     cv.Required(CONF_RIGHT_MOTOR_UP_PIN): cv.int_range(min=0, max=39),
@@ -72,10 +68,6 @@ async def to_code(config):
         config[CONF_ID],
         config[CONF_REED_PIN],
         config[CONF_WHEEL_SIZE],
-        config[CONF_LEFT_TRIGGER_PIN],
-        config[CONF_LEFT_ECHO_PIN],
-        config[CONF_RIGHT_TRIGGER_PIN],
-        config[CONF_RIGHT_ECHO_PIN],
         config[CONF_LEFT_MOTOR_UP_PIN],
         config[CONF_LEFT_MOTOR_DOWN_PIN],
         config[CONF_RIGHT_MOTOR_UP_PIN],
@@ -83,6 +75,13 @@ async def to_code(config):
         config[CONF_TOLERANCE],
     )
     await cg.register_component(var, config)
+
+    # Set UART components
+    left_uart = await cg.get_variable(config[CONF_LEFT_UART_ID])
+    cg.add(var.set_left_uart(left_uart))
+
+    right_uart = await cg.get_variable(config[CONF_RIGHT_UART_ID])
+    cg.add(var.set_right_uart(right_uart))
 
     if CONF_SPEED_SENSOR in config:
         sens = await sensor.new_sensor(config[CONF_SPEED_SENSOR])

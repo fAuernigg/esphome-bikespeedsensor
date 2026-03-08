@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/number/number.h"
+#include "esphome/components/uart/uart.h"
 
 namespace erocket {
 
@@ -15,11 +16,15 @@ class ERocketComponent : public esphome::Component {
   volatile int pulse_count = 0;
   unsigned long last_speed_update = 0;
 
-  // Ultrasonic sensors
-  int left_trigger_pin;
-  int left_echo_pin;
-  int right_trigger_pin;
-  int right_echo_pin;
+  // UART components for ultrasonic sensors (auto serial mode)
+  esphome::uart::UARTComponent *left_uart{nullptr};
+  esphome::uart::UARTComponent *right_uart{nullptr};
+
+  // UART data buffers (4-byte packets: 0xFF, HighByte, LowByte, Unknown)
+  uint8_t left_buffer[4] = {0};
+  uint8_t right_buffer[4] = {0};
+  uint8_t left_buffer_pos = 0;
+  uint8_t right_buffer_pos = 0;
 
   // Motor control pins
   int left_motor_up_pin;
@@ -32,11 +37,6 @@ class ERocketComponent : public esphome::Component {
   unsigned long last_motor_update = 0;
   unsigned long motor_interval = 200; // ms between motor updates
 
-  // Timing control
-  unsigned long last_ultrasonic_update = 0;
-  unsigned long ultrasonic_interval = 100; // ms between measurements
-  bool measure_left_next = true; // Alternate between sensors
-
   // Sensor outputs
   esphome::sensor::Sensor *speed_sensor{nullptr};
   esphome::sensor::Sensor *left_distance_sensor{nullptr};
@@ -47,14 +47,10 @@ class ERocketComponent : public esphome::Component {
   esphome::number::Number *right_target_distance{nullptr};
 
   ERocketComponent(int reed, float wheel_size_inch,
-                   int left_trig, int left_echo,
-                   int right_trig, int right_echo,
                    int left_up, int left_down,
                    int right_up, int right_down,
                    float tol)
       : reed_pin(reed), wheel_inch(wheel_size_inch),
-        left_trigger_pin(left_trig), left_echo_pin(left_echo),
-        right_trigger_pin(right_trig), right_echo_pin(right_echo),
         left_motor_up_pin(left_up), left_motor_down_pin(left_down),
         right_motor_up_pin(right_up), right_motor_down_pin(right_down),
         tolerance(tol) {
@@ -73,15 +69,6 @@ class ERocketComponent : public esphome::Component {
     pinMode(reed_pin, INPUT_PULLUP);
     attachInterruptArg(digitalPinToInterrupt(reed_pin), on_pulse_static, this, FALLING);
 
-    // Setup ultrasonic pins
-    pinMode(left_trigger_pin, OUTPUT);
-    pinMode(left_echo_pin, INPUT);
-    pinMode(right_trigger_pin, OUTPUT);
-    pinMode(right_echo_pin, INPUT);
-
-    digitalWrite(left_trigger_pin, LOW);
-    digitalWrite(right_trigger_pin, LOW);
-
     // Setup motor control pins
     pinMode(left_motor_up_pin, OUTPUT);
     pinMode(left_motor_down_pin, OUTPUT);
@@ -95,6 +82,10 @@ class ERocketComponent : public esphome::Component {
     digitalWrite(right_motor_down_pin, LOW);
   }
 
+  void dump_config() override {
+    ESP_LOGCONFIG("erocket", "ERocket Component");
+  }
+
   void loop() override {
     unsigned long now = millis();
 
@@ -104,22 +95,52 @@ class ERocketComponent : public esphome::Component {
       last_speed_update = now;
     }
 
-    // Update ultrasonic sensors alternating (not simultaneously)
-    // This reduces interrupt-disable time by 50%
-    if (now - last_ultrasonic_update >= ultrasonic_interval) {
-      if (measure_left_next) {
-        float left_distance = measure_distance(left_trigger_pin, left_echo_pin);
-        if (left_distance_sensor != nullptr && left_distance > 0) {
-          left_distance_sensor->publish_state(left_distance);
-        }
-      } else {
-        float right_distance = measure_distance(right_trigger_pin, right_echo_pin);
-        if (right_distance_sensor != nullptr && right_distance > 0) {
-          right_distance_sensor->publish_state(right_distance);
+    // Read UART data from left sensor
+    if (left_uart != nullptr) {
+      while (left_uart->available()) {
+        uint8_t byte;
+        left_uart->read_byte(&byte);
+
+        if (byte == 0xFF && left_buffer_pos == 0) {
+          left_buffer[left_buffer_pos++] = byte;
+        } else if (left_buffer_pos > 0 && left_buffer_pos < 4) {
+          left_buffer[left_buffer_pos++] = byte;
+
+          if (left_buffer_pos == 4) {
+            float distance = parse_sro4m_packet(left_buffer, "Left");
+            if (distance > 0 && left_distance_sensor != nullptr) {
+              left_distance_sensor->publish_state(distance);
+            }
+            left_buffer_pos = 0;
+          }
+        } else {
+          left_buffer_pos = 0;
         }
       }
-      measure_left_next = !measure_left_next;
-      last_ultrasonic_update = now;
+    }
+
+    // Read UART data from right sensor
+    if (right_uart != nullptr) {
+      while (right_uart->available()) {
+        uint8_t byte;
+        right_uart->read_byte(&byte);
+
+        if (byte == 0xFF && right_buffer_pos == 0) {
+          right_buffer[right_buffer_pos++] = byte;
+        } else if (right_buffer_pos > 0 && right_buffer_pos < 4) {
+          right_buffer[right_buffer_pos++] = byte;
+
+          if (right_buffer_pos == 4) {
+            float distance = parse_sro4m_packet(right_buffer, "Right");
+            if (distance > 0 && right_distance_sensor != nullptr) {
+              right_distance_sensor->publish_state(distance);
+            }
+            right_buffer_pos = 0;
+          }
+        } else {
+          right_buffer_pos = 0;
+        }
+      }
     }
 
     // Update motor control
@@ -149,67 +170,21 @@ class ERocketComponent : public esphome::Component {
     }
   }
 
-  float measure_distance(int trigger_pin, int echo_pin) {
-    // Store reed pin state before measurement
-    int reed_state_before = digitalRead(reed_pin);
-
-    // Send trigger pulse (interrupts enabled, this is not timing-critical)
-    digitalWrite(trigger_pin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigger_pin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigger_pin, LOW);
-
-    // Wait for echo to start (interrupts enabled)
-    unsigned long timeout = 25000; // 25ms timeout (~4m range)
-    unsigned long start = micros();
-
-    while (digitalRead(echo_pin) == LOW) {
-      if (micros() - start > timeout) {
-        return -1; // Timeout
-      }
-      // Yield briefly to allow interrupts
-      if ((micros() - start) % 1000 == 0) {
-        delayMicroseconds(1);
-      }
-    }
-
-    // Echo started - NOW disable interrupts for precise timing
-    noInterrupts();
-    unsigned long pulse_start = micros();
-
-    // Measure echo pulse duration with interrupts disabled
-    while (digitalRead(echo_pin) == HIGH) {
-      if (micros() - pulse_start > timeout) {
-        interrupts();
-        return -1; // Timeout
-      }
-    }
-    unsigned long pulse_end = micros();
-
-    // Re-enable interrupts immediately
-    interrupts();
-
-    // Check if we might have missed a reed pulse during measurement
-    int reed_state_after = digitalRead(reed_pin);
-    unsigned long measurement_time = pulse_end - pulse_start;
-
-    // If reed pin changed state and measurement took >5ms, we might have missed a pulse
-    // This is a safety check - in practice, interrupts are only disabled for 2-20ms
-    if (reed_state_before != reed_state_after && measurement_time > 5000) {
-      ESP_LOGW("erocket", "Possible missed pulse during ultrasonic measurement (%lu us)", measurement_time);
-    }
-
-    // Calculate distance in cm
-    unsigned long duration = pulse_end - pulse_start;
-    float distance = duration * 0.034f / 2.0f; // Speed of sound: 340m/s
-
-    // Sanity check (2cm to 400cm range for JSN-SR04T)
-    if (distance < 2.0f || distance > 400.0f) {
+  float parse_sro4m_packet(uint8_t *buffer, const char *sensor_name) {
+    if (buffer[0] != 0xFF) {
       return -1;
     }
 
-    return distance;
+    // Extract distance (in millimeters)
+    uint16_t distance_mm = (buffer[1] << 8) | buffer[2];
+    float distance_cm = distance_mm / 10.0f;
+
+    // Sanity check (20mm to 4000mm range)
+    if (distance_cm < 22.4f || distance_cm > 200.0f) {
+      return -1;
+    }
+
+    return distance_cm;
   }
 
   void update_motor_control() {
@@ -263,6 +238,8 @@ class ERocketComponent : public esphome::Component {
   void set_right_distance_sensor(esphome::sensor::Sensor *sensor) { right_distance_sensor = sensor; }
   void set_left_target_distance(esphome::number::Number *number) { left_target_distance = number; }
   void set_right_target_distance(esphome::number::Number *number) { right_target_distance = number; }
+  void set_left_uart(esphome::uart::UARTComponent *uart) { left_uart = uart; }
+  void set_right_uart(esphome::uart::UARTComponent *uart) { right_uart = uart; }
 };
 
 }  // namespace erocket
